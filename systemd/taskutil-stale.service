@@ -1,0 +1,8 @@
+[Unit]
+Description=taskutil stale: warn when ~/.task or its mirrors fall behind
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/taskutil stale --notify
+# Exit 1 (warnings) is the point of the check, not a failure of the unit.
+SuccessExitStatus=1 2
