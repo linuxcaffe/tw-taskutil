@@ -12,6 +12,10 @@ Commands
                                   Warn when uncommitted changes or unpushed
                                   commits get old, or a mirror is unreachable
                                   or has commits this repo lacks. Read-only.
+  taskutil config check [--taskrc F]
+                                  Every `include` in the TASKRC chain must
+                                  resolve, as Taskwarrior resolves it; then
+                                  `task` itself must start. Read-only.
   taskutil web probe [--port N]   Probe a running tw-web from outside, the way
                                   an attacker would.
 
@@ -31,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 OK, WARN, FAIL = 'ok', 'warn', 'fail'
 EVIL_ORIGIN = 'https://evil.example'
@@ -310,14 +314,75 @@ def stale(dirs, max_age=2 * 86400, mirror_age=7 * 86400, fetch=True, now=None):
     return checks
 
 
-def _notify(checks):
+# ── config: include chain ─────────────────────────────────────────────────────
+
+SYSTEM_RC_DIR = Path('/usr/share/taskwarrior')
+INCLUDE_RE = __import__('re').compile(r'^\s*include\s+(\S.*?)\s*$')
+
+
+def _resolve_include(value, including_file):
+    """Where Taskwarrior 2.6.2 looks for `include value` (verified on the binary):
+    absolute or ~ as written; else the including file's folder; else the system folder."""
+    p = Path(os.path.expanduser(value))
+    if p.is_absolute():
+        return [p]
+    return [including_file.parent / p, SYSTEM_RC_DIR / p]
+
+
+def _walk_includes(rcfile, seen, found, missing):
+    rcfile = rcfile.resolve()
+    if rcfile in seen:
+        return
+    seen.add(rcfile)
+    for n, line in enumerate(rcfile.read_text(errors='replace').splitlines(), 1):
+        m = INCLUDE_RE.match(line)
+        if not m:
+            continue
+        candidates = _resolve_include(m.group(1), rcfile)
+        hit = next((c for c in candidates if c.is_file()), None)
+        if hit is None:
+            missing.append((rcfile, n, m.group(1)))
+        else:
+            found.append(hit)
+            _walk_includes(hit, seen, found, missing)
+
+
+def config_check(taskrc=None):
+    rc = Path(taskrc or os.environ.get('TASKRC') or Path.home() / '.taskrc').expanduser()
+    if not rc.is_file():
+        return [_check(f'taskrc {rc}', FAIL, 'not found')]
+    found, missing = [], []
+    _walk_includes(rc, set(), found, missing)
+    home = str(Path.home())
+    short = lambda p: str(p).replace(home, '~', 1)
+    checks = [_check(f'{short(f)} line {n}', FAIL,
+                     f'include {value}: file not found (comment the line out, or restore the file)')
+              for f, n, value in missing]
+    if not missing:
+        checks.append(_check(f'includes in {short(rc)}', OK, f'{_plural(len(found), "include")}, all found'))
+    # Taskwarrior has the last word: does it start with this rc?
+    try:
+        r = subprocess.run(['task', 'rc.hooks=off', '_version'], capture_output=True, text=True,
+                           timeout=15, env=dict(os.environ, TASKRC=str(rc)))
+        if r.returncode == 0:
+            checks.append(_check('task starts', OK, f'task {r.stdout.strip()}'))
+        else:
+            checks.append(_check('task starts', FAIL, (r.stderr or r.stdout).strip().splitlines()[-1]))
+    except FileNotFoundError:
+        checks.append(_check('task starts', WARN, 'task not installed'))
+    except subprocess.TimeoutExpired:
+        checks.append(_check('task starts', FAIL, 'task timed out'))
+    return checks
+
+
+def _notify(checks, title='taskutil stale'):
     bad = [c for c in checks if c['status'] != OK]
     if not bad:
         return
     body = '\n'.join(f'{c["check"]}: {c["detail"]}' for c in bad[:6])
     urgency = 'critical' if any(c['status'] == FAIL for c in bad) else 'normal'
     try:
-        subprocess.run(['notify-send', '-u', urgency, '-a', 'taskutil', 'taskutil stale', body],
+        subprocess.run(['notify-send', '-u', urgency, '-a', 'taskutil', title, body],
                        timeout=10, capture_output=True)
     except Exception:
         pass
@@ -355,6 +420,11 @@ def main(argv=None):
     st.add_argument('--no-fetch', action='store_true', help='skip the mirrors (offline)')
     st.add_argument('--notify', action='store_true', help='desktop notification when something is wrong')
     st.add_argument('--json', action='store_true')
+    cf = sub.add_parser('config', help='Taskwarrior configuration checks').add_subparsers(dest='config_cmd', required=True)
+    cc = cf.add_parser('check', help='every include resolves and task starts')
+    cc.add_argument('--taskrc', help='rc file (default: $TASKRC or ~/.taskrc)')
+    cc.add_argument('--notify', action='store_true', help='desktop notification when something is wrong')
+    cc.add_argument('--json', action='store_true')
     web = sub.add_parser('web', help='tw-web server checks').add_subparsers(dest='web_cmd', required=True)
     pr = web.add_parser('probe', help='probe a running tw-web from outside')
     pr.add_argument('--port', type=int, default=int(os.environ.get('TW_WEB_PORT', 5000)))
@@ -367,6 +437,11 @@ def main(argv=None):
         checks = stale(a.dir or [task_dir()], a.max_age * 86400, a.mirror_age * 86400, not a.no_fetch)
         if a.notify:
             _notify(checks)
+        return _report(checks, a.json)
+    if a.cmd == 'config' and a.config_cmd == 'check':
+        checks = config_check(a.taskrc)
+        if a.notify:
+            _notify(checks, 'taskutil config check')
         return _report(checks, a.json)
     if a.cmd == 'web' and a.web_cmd == 'probe':
         return _report(web_probe(a.port), a.json)
