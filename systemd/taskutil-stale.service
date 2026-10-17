@@ -1,9 +1,10 @@
 [Unit]
-Description=taskutil daily checks: ~/.task and mirrors current, taskrc includes resolve
+Description=taskutil daily checks: ~/.task and mirrors current, taskrc includes resolve, holidays current
 
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/taskutil stale --notify
 ExecStart=%h/.local/bin/taskutil config check --notify
+ExecStart=%h/.local/bin/taskutil holidays check --notify
 # Exit 1 (warnings) is the point of the check, not a failure of the unit.
 SuccessExitStatus=1 2

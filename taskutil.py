@@ -16,6 +16,10 @@ Commands
                                   Every `include` in the TASKRC chain must
                                   resolve, as Taskwarrior resolves it; then
                                   `task` itself must start. Read-only.
+  taskutil holidays check|refresh
+                                  Run tw-holidata's `holidata check` (holidays
+                                  about to run out, settings changed, task can't
+                                  see them) or `holidata refresh`.
   taskutil web probe [--port N]   Probe a running tw-web from outside, the way
                                   an attacker would.
 
@@ -35,7 +39,7 @@ import sys
 import time
 from pathlib import Path
 
-__version__ = '0.3.0'
+__version__ = '0.4.0'
 
 OK, WARN, FAIL = 'ok', 'warn', 'fail'
 EVIL_ORIGIN = 'https://evil.example'
@@ -375,6 +379,36 @@ def config_check(taskrc=None):
     return checks
 
 
+# ── holidays (tw-holidata owns them; taskutil finds it, reports and nags) ──────
+
+def _holidata():
+    import shutil
+    found = shutil.which('holidata')
+    if found:
+        return found
+    p = task_dir() / 'scripts' / 'holidata'
+    return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+
+
+def holidays(action):
+    exe = _holidata()
+    if exe is None:
+        if action == 'check' and not (task_dir() / 'config' / 'holidata.rc').is_file():
+            return [_check('holidays', OK, 'holidata not installed (tw -I holidata)')]
+        return [_check('holidays', WARN if action == 'check' else FAIL,
+                       'holidata not found: install it with tw -I holidata')]
+    try:
+        r = subprocess.run([exe, action, '--json'], capture_output=True, text=True,
+                           timeout=60 if action == 'refresh' else 20)
+        out = json.loads(r.stdout)
+        return [_check(f'holidays {c["check"]}', c['status'], c['detail']) for c in out['checks']]
+    except subprocess.TimeoutExpired:
+        return [_check('holidays', FAIL, f'holidata {action} timed out')]
+    except (ValueError, KeyError, TypeError):
+        text = (r.stderr or r.stdout).strip().splitlines()
+        return [_check('holidays', FAIL, f'holidata {action}: {text[-1] if text else "no output"}')]
+
+
 def _notify(checks, title='taskutil stale'):
     bad = [c for c in checks if c['status'] != OK]
     if not bad:
@@ -425,6 +459,13 @@ def main(argv=None):
     cc.add_argument('--taskrc', help='rc file (default: $TASKRC or ~/.taskrc)')
     cc.add_argument('--notify', action='store_true', help='desktop notification when something is wrong')
     cc.add_argument('--json', action='store_true')
+    hd = sub.add_parser('holidays', help='holidays from tw-holidata').add_subparsers(dest='holidays_cmd', required=True)
+    for name, text in (('check', 'holidays current, settings applied, task sees them'),
+                       ('refresh', 'run holidata refresh')):
+        h = hd.add_parser(name, help=text)
+        h.add_argument('--json', action='store_true')
+        if name == 'check':
+            h.add_argument('--notify', action='store_true', help='desktop notification when something is wrong')
     web = sub.add_parser('web', help='tw-web server checks').add_subparsers(dest='web_cmd', required=True)
     pr = web.add_parser('probe', help='probe a running tw-web from outside')
     pr.add_argument('--port', type=int, default=int(os.environ.get('TW_WEB_PORT', 5000)))
@@ -442,6 +483,11 @@ def main(argv=None):
         checks = config_check(a.taskrc)
         if a.notify:
             _notify(checks, 'taskutil config check')
+        return _report(checks, a.json)
+    if a.cmd == 'holidays':
+        checks = holidays(a.holidays_cmd)
+        if getattr(a, 'notify', False):
+            _notify(checks, 'taskutil holidays')
         return _report(checks, a.json)
     if a.cmd == 'web' and a.web_cmd == 'probe':
         return _report(web_probe(a.port), a.json)
