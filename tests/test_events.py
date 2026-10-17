@@ -1,5 +1,5 @@
-"""taskutil holidays: runs tw-holidata's `holidata` (it owns the settings and the data);
-taskutil only finds it, reports its checks and nags. A fake `holidata` stands in here, so
+"""taskutil events (alias holidays): runs tw-events' `events` (it owns the settings and the data);
+taskutil only finds it, reports its checks and nags. A fake `events` stands in here, so
 nothing touches the network or ~/.task."""
 import importlib.util
 import json
@@ -20,13 +20,13 @@ def tdir(tmp_path, monkeypatch):
     (d / 'config').mkdir(parents=True)
     (d / 'scripts').mkdir()
     monkeypatch.setenv('TW_TASK_DIR', str(d))
-    monkeypatch.setenv('PATH', str(tmp_path / 'bin'))      # no real holidata on PATH
+    monkeypatch.setenv('PATH', str(tmp_path / 'bin'))      # no real events on PATH
     return d
 
 
-def fake_holidata(tdir, status='ok', checks=None, code=0):
-    """A holidata in the task dir's scripts/ (where tw -I puts it) that logs its argv."""
-    script = tdir / 'scripts' / 'holidata'
+def fake_events(tdir, status='ok', checks=None, code=0):
+    """An events in the task dir's scripts/ (where tw -I puts it) that logs its argv."""
+    script = tdir / 'scripts' / 'events'
     out = json.dumps({'status': status, 'checks': checks or [
         {'check': 'coverage', 'status': status, 'detail': 'through 2027-12-26'}]})
     script.write_text(f"#!/bin/sh\necho \"$@\" >> {tdir / 'argv.log'}\necho '{out}'\nexit {code}\n")
@@ -34,8 +34,8 @@ def fake_holidata(tdir, status='ok', checks=None, code=0):
     return script
 
 
-def run(capsys, *args):
-    code = taskutil.main(['holidays', *args, '--json'])
+def run(capsys, *args, cmd='events'):
+    code = taskutil.main([cmd, *args, '--json'])
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -44,36 +44,42 @@ def test_not_installed_is_ok(tdir, capsys):
     assert code == 0 and 'not installed' in out['checks'][0]['detail']
 
 
-def test_settings_without_holidata_warns(tdir, capsys):
-    (tdir / 'config' / 'holidata.rc').write_text('holidata.locale = en-CA\n')
+def test_settings_without_events_warns(tdir, capsys):
+    (tdir / 'config' / 'events.rc').write_text('events.locale = en-CA\n')
     code, out = run(capsys, 'check')
-    assert code == 1 and 'tw -I holidata' in out['checks'][0]['detail']
+    assert code == 1 and 'tw -I events' in out['checks'][0]['detail']
 
 
-def test_check_reports_holidatas_checks(tdir, capsys):
-    fake_holidata(tdir, 'warn', [{'check': 'coverage', 'status': 'warn',
-                                  'detail': 'holidays end 2026-12-26: run holidata refresh'}], code=1)
+def test_holidays_is_an_alias(tdir, capsys):
+    fake_events(tdir)
+    code, out = run(capsys, 'check', cmd='holidays')
+    assert code == 0 and (tdir / 'argv.log').read_text().split() == ['check', '--json']
+
+
+def test_check_reports_events_checks(tdir, capsys):
+    fake_events(tdir, 'warn', [{'check': 'coverage', 'status': 'warn',
+                                  'detail': 'holidays end 2026-12-26: run events refresh'}], code=1)
     code, out = run(capsys, 'check')
     assert code == 1
-    assert out['checks'] == [{'check': 'holidays coverage', 'status': 'warn', 'finding': '',
-                              'detail': 'holidays end 2026-12-26: run holidata refresh'}]
+    assert out['checks'] == [{'check': 'events coverage', 'status': 'warn', 'finding': '',
+                              'detail': 'holidays end 2026-12-26: run events refresh'}]
     assert (tdir / 'argv.log').read_text().split() == ['check', '--json']
 
 
 def test_check_survives_garbage(tdir, capsys):
-    script = fake_holidata(tdir)
+    script = fake_events(tdir)
     script.write_text('#!/bin/sh\necho oops\nexit 2\n')
     code, out = run(capsys, 'check')
     assert code == 2 and 'oops' in out['checks'][0]['detail']
 
 
-def test_refresh_runs_holidata_refresh(tdir, capsys):
-    fake_holidata(tdir)
+def test_refresh_runs_events_refresh(tdir, capsys):
+    fake_events(tdir)
     code, out = run(capsys, 'refresh')
     assert code == 0
     assert (tdir / 'argv.log').read_text().split() == ['refresh', '--json']
 
 
-def test_refresh_without_holidata(tdir, capsys):
+def test_refresh_without_events(tdir, capsys):
     code, out = run(capsys, 'refresh')
-    assert code == 2 and 'tw -I holidata' in out['checks'][0]['detail']
+    assert code == 2 and 'tw -I events' in out['checks'][0]['detail']
